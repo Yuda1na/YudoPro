@@ -397,6 +397,19 @@ local function setupNetworkInterceptors()
                         original = oldTrampoline or original, hooked = hook
                     }
                 end
+                if type(getgenv) == "function" then
+                    pcall(
+                        function()
+                            local g = getgenv()
+                            if target.name == "request" then
+                                g.request = hook
+                            end
+                            if target.name == "http_request" then
+                                g.http_request = hook
+                            end
+                        end
+                    )
+                end
             end
         )
     end
@@ -505,7 +518,7 @@ if type(restoreclosure) == "function" and type(hookfunction) == "function" then
     )
 end
 
-if type(gethwid) == "function" and type(hookfunction) == "function" then
+if type(gethwid) == "function" then
     pcall(
         function()
             local origGethwid = (type(clonefunction) == "function" and clonefunction(gethwid))
@@ -524,8 +537,29 @@ if type(gethwid) == "function" and type(hookfunction) == "function" then
                     return Config.fakeHWID
                 end
             )
-            oldTrampoline = hookfunction(gethwid, hwidHook)
-            hookedFunctions["gethwid"] = {original = oldTrampoline or origGethwid, hooked = hwidHook}
+            if type(hookfunction) == "function" then
+                oldTrampoline = hookfunction(gethwid, hwidHook)
+                hookedFunctions["gethwid"] = {
+                    original = oldTrampoline or origGethwid, hooked = hwidHook
+                }
+            end
+            if type(getgenv) == "function" then
+                pcall(
+                    function()
+                        getgenv().gethwid = hwidHook
+                    end
+                )
+            end
+        end
+    )
+elseif type(getgenv) == "function" then
+    pcall(
+        function()
+            getgenv().gethwid = registerProtectedClosure(
+                function()
+                    return Config.fakeHWID
+                end
+            )
         end
     )
 end
@@ -707,21 +741,13 @@ end
 setupShellProtection()
 
 local function setupMetamethodGuards()
-    local ok, rawMeta = pcall(getrawmetatable, game)
-    if not ok or not rawMeta then
-        return
-    end
+    local oldNamecall = nil
 
-    local oldNamecall = rawMeta.__namecall
-    originalNamecall = oldNamecall
-
-    if type(setreadonly) == "function" then
-        pcall(setreadonly, rawMeta, false)
-    end
-
-    local newNamecall = newcclosure and newcclosure(
+    local newNamecall = (type(newcclosure) == "function" and newcclosure or function(f)
+        return f
+    end)(
         function(self, ...)
-            local method = getnamecallmethod()
+            local method = (type(getnamecallmethod) == "function" and getnamecallmethod()) or ""
 
             if Config.robuxVault and self == MarketplaceService then
                 if method == "PromptPurchase" or method == "PromptProductPurchase" or method == "PromptGamePassPurchase" or method == "PromptSubscriptionPurchase" or method == "PromptBundlePurchase" then
@@ -730,7 +756,7 @@ local function setupMetamethodGuards()
                     local assetId = tostring(args[2] or "Unknown")
                     recordThreat(
                         "Robux-Vault",
-                        "Blocked purchase prompt! Call: " .. method .. " | Asset: " .. assetId
+                        "Blocked purchase prompt! Call: " .. tostring(method) .. " | Asset: " .. assetId
                     )
                     pushAlert("Robux Vault", "Blocked prompt purchase for AssetId: " .. assetId, 3)
                     updateStatsUI()
@@ -756,7 +782,8 @@ local function setupMetamethodGuards()
                     local targetUrl = tostring(args[1] or "")
                     if isWebhook(targetUrl) or isIPGrabber(targetUrl) or isRobloxWeb(targetUrl) then
                         recordThreat(
-                            "HttpService", "Blocked HttpService." .. method .. " to: " .. targetUrl
+                            "HttpService",
+                            "Blocked HttpService." .. tostring(method) .. " to: " .. targetUrl
                         )
                         return ""
                     end
@@ -775,23 +802,39 @@ local function setupMetamethodGuards()
                 end
             end
 
-            return oldNamecall(self, ...)
-        end
-    ) or function(self, ...)
-        local method = getnamecallmethod()
-        if Config.robuxVault and self == MarketplaceService then
-            if method == "PromptPurchase" or method == "PromptProductPurchase" or method == "PromptGamePassPurchase" then
-                Stats.robuxPromptsBlocked = Stats.robuxPromptsBlocked + 1
-                return nil
+            if oldNamecall then
+                return oldNamecall(self, ...)
             end
+            return nil
         end
-        return oldNamecall(self, ...)
+    )
+
+    if type(hookmetamethod) == "function" then
+        pcall(
+            function()
+                oldNamecall = hookmetamethod(game, "__namecall", newNamecall)
+                originalNamecall = oldNamecall
+            end
+        )
     end
 
-    rawMeta.__namecall = newNamecall
-
-    if type(setreadonly) == "function" then
-        pcall(setreadonly, rawMeta, true)
+    if not oldNamecall and type(getrawmetatable) == "function" then
+        pcall(
+            function()
+                local rawMeta = getrawmetatable(game)
+                if rawMeta then
+                    oldNamecall = rawMeta.__namecall
+                    originalNamecall = oldNamecall
+                    if type(setreadonly) == "function" then
+                        pcall(setreadonly, rawMeta, false)
+                    end
+                    rawMeta.__namecall = newNamecall
+                    if type(setreadonly) == "function" then
+                        pcall(setreadonly, rawMeta, true)
+                    end
+                end
+            end
+        )
     end
 end
 setupMetamethodGuards()
@@ -831,7 +874,7 @@ local function setupFileSystemProtection()
         return true, nil
     end
 
-    if type(writefile) == "function" and type(hookfunction) == "function" then
+    if type(writefile) == "function" then
         pcall(
             function()
                 local origWrite = writefile
@@ -863,15 +906,24 @@ local function setupFileSystemProtection()
                         return origWrite(path, content, ...)
                     end
                 )
-                oldTrampoline = hookfunction(writefile, writeHook)
-                hookedFunctions["writefile"] = {
-                    original = oldTrampoline or origWrite, hooked = writeHook
-                }
+                if type(hookfunction) == "function" then
+                    oldTrampoline = hookfunction(writefile, writeHook)
+                    hookedFunctions["writefile"] = {
+                        original = oldTrampoline or origWrite, hooked = writeHook
+                    }
+                end
+                if type(getgenv) == "function" then
+                    pcall(
+                        function()
+                            getgenv().writefile = writeHook
+                        end
+                    )
+                end
             end
         )
     end
 
-    if type(appendfile) == "function" and type(hookfunction) == "function" then
+    if type(appendfile) == "function" then
         pcall(
             function()
                 local origAppend = appendfile
@@ -903,10 +955,19 @@ local function setupFileSystemProtection()
                         return origAppend(path, content, ...)
                     end
                 )
-                oldTrampoline = hookfunction(appendfile, appendHook)
-                hookedFunctions["appendfile"] = {
-                    original = oldTrampoline or origAppend, hooked = appendHook
-                }
+                if type(hookfunction) == "function" then
+                    oldTrampoline = hookfunction(appendfile, appendHook)
+                    hookedFunctions["appendfile"] = {
+                        original = oldTrampoline or origAppend, hooked = appendHook
+                    }
+                end
+                if type(getgenv) == "function" then
+                    pcall(
+                        function()
+                            getgenv().appendfile = appendHook
+                        end
+                    )
+                end
             end
         )
     end

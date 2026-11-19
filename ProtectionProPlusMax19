@@ -1,0 +1,1698 @@
+if _G.YudoProtection and type(_G.YudoProtection.unload) == "function" then
+    pcall(
+        function()
+            _G.YudoProtection.unload()
+        end
+    )
+    _G.YudoProtection = nil
+end
+
+local Players = game:GetService("Players")
+local MarketplaceService = game:GetService("MarketplaceService")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local CoreGui = game:GetService("CoreGui")
+local Lighting = game:GetService("Lighting")
+local SoundService = game:GetService("SoundService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TextChatService = game:GetService("TextChatService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer and LocalPlayer:WaitForChild("PlayerGui", 5)
+
+local poolLocations = {
+    {
+        city = "Zurich", country = "Switzerland", countryCode = "CH", region = "ZH",
+        isp = "Init7 AG", ipPrefix = "185.220."
+    },
+    {
+        city = "Reykjavik", country = "Iceland", countryCode = "IS", region = "1",
+        isp = "Siminn hf", ipPrefix = "194.26."
+    },
+    {
+        city = "Amsterdam", country = "Netherlands", countryCode = "NL", region = "NH",
+        isp = "WorldStream B.V.", ipPrefix = "178.62."
+    },
+    {
+        city = "Stockholm", country = "Sweden", countryCode = "SE", region = "AB",
+        isp = "Bahnhof AB", ipPrefix = "89.187."
+    },
+    {
+        city = "Frankfurt", country = "Germany", countryCode = "DE", region = "HE",
+        isp = "Hetzner Online GmbH", ipPrefix = "144.76."
+    },
+    {
+        city = "Oslo", country = "Norway", countryCode = "NO", region = "03",
+        isp = "Telenor Norge AS", ipPrefix = "45.133."
+    },
+    {
+        city = "Helsinki", country = "Finland", countryCode = "FI", region = "18", isp = "DNA Oyj",
+        ipPrefix = "193.111."
+    },
+    {
+        city = "Tokyo", country = "Japan", countryCode = "JP", region = "13",
+        isp = "KDDI Corporation", ipPrefix = "106.130."
+    },
+    {
+        city = "Montreal", country = "Canada", countryCode = "CA", region = "QC",
+        isp = "OVH Hosting Inc.", ipPrefix = "192.99."
+    },
+    {
+        city = "Vienna", country = "Austria", countryCode = "AT", region = "9",
+        isp = "A1 Telekom Austria", ipPrefix = "80.120."
+    }
+}
+
+local function generateRandomHex(length)
+    local hexChars = "0123456789ABCDEF"
+    local result = {}
+    for i = 1, length do
+        local r = math.random(1, 16)
+        result[i] = string.sub(hexChars, r, r)
+    end
+    return table.concat(result)
+end
+
+local function generateRandomHWID()
+    return string.format(
+        "%s-%s-%s-%s-%s", generateRandomHex(8), generateRandomHex(4), "4" .. generateRandomHex(3),
+        generateRandomHex(4), generateRandomHex(12)
+    )
+end
+
+local function generateRandomIdentity()
+    math.randomseed(
+        os.time() + math.floor(tick() % 100000) + (LocalPlayer and LocalPlayer.UserId or 12345)
+    )
+    local loc = poolLocations[math.random(1, #poolLocations)]
+    local ip = loc.ipPrefix .. tostring(math.random(2, 254)) .. "." .. tostring(math.random(2, 254))
+    local hwid = generateRandomHWID()
+    return ip, loc.city .. ", " .. loc.country, hwid, loc
+end
+
+local initIP, initLoc, initHWID, initMeta = generateRandomIdentity()
+
+local Config = {
+    trafficSentinel = true, webhookNeutralizer = true, ipMasking = true, shellGuard = true,
+    fileSandbox = true, httpServiceFilter = true, sessionApiShield = true,
+    spoofLoggerResponse = true, fakeIP = initIP, fakeLocation = initLoc,
+    fakeCountry = initMeta.country, fakeCountryCode = initMeta.countryCode,
+    fakeCity = initMeta.city, fakeRegion = initMeta.region, fakeISP = initMeta.isp,
+    fakeHWID = initHWID, spoofHWID = true, clientCloak = false, clipboardLock = true,
+    closureArmor = true, silentMouth = true, overlayEraser = true, robuxVault = true,
+    serverHopBlocker = false, maxWriteMB = 5, stealthMasking = true, antiRestore = true,
+    earProtection = true, antiFlashbang = true, logOutboundRequests = false, inGameAlerts = true
+}
+
+local Stats = {
+    webhooksBlocked = 0, ipGrabbersBlocked = 0, robuxPromptsBlocked = 0, suspiciousFilesBlocked = 0,
+    overlaysErased = 0, serverHopsBlocked = 0, clipboardAttacksBlocked = 0,
+    shellAttemptsBlocked = 0, robloxApisBlocked = 0, forcedChatsBlocked = 0, debugAttacksBlocked = 0
+}
+
+local ThreatLogs = {}
+local hookedFunctions = {}
+local protectedClosures = {}
+local originalNamecall = nil
+local connections = {}
+
+local statElements = {}
+local logConsole = nil
+
+local function isYudoClosure(fn)
+    if not fn then
+        return false
+    end
+    for _, f in ipairs(protectedClosures) do
+        if f == fn then
+            return true
+        end
+    end
+    for _, h in pairs(hookedFunctions) do
+        if h.hooked == fn or h.original == fn then
+            return true
+        end
+    end
+    return false
+end
+
+local function registerProtectedClosure(fn)
+    if type(fn) == "function" then
+        table.insert(protectedClosures, fn)
+    end
+    return fn
+end
+
+local function recordThreat(tag, info)
+    local t = os.date("%X")
+    local line = string.format("[%s] [%s] %s", t, string.upper(tag), tostring(info))
+    table.insert(ThreatLogs, 1, line)
+    if #ThreatLogs > 150 then
+        table.remove(ThreatLogs)
+    end
+    if logConsole and type(logConsole.Append) == "function" then
+        pcall(
+            function()
+                logConsole:Append(line)
+            end
+        )
+    end
+end
+
+local function updateStatsUI()
+    for key, elem in pairs(statElements) do
+        if elem and Stats[key] ~= nil then
+            pcall(
+                function()
+                    if type(elem.Set) == "function" then
+                        elem:Set(tostring(Stats[key]))
+                    end
+                end
+            )
+        end
+    end
+end
+
+local function pushAlert(title, message, duration)
+    if not Config.inGameAlerts then
+        return
+    end
+    pcall(
+        function()
+            if _G.YudoWindow and type(_G.YudoWindow.Notify) == "function" then
+                _G.YudoWindow:Notify(
+                    {title = title or "Yudo Protection", content = message or "", duration = duration or 3}
+                )
+            elseif Rayfield and type(Rayfield.Notify) == "function" then
+                Rayfield:Notify(
+                    {title = title or "Yudo Protection", content = message or "", duration = duration or 3}
+                )
+            end
+        end
+    )
+end
+
+local WEBHOOK_PATTERNS = {
+    "discord.com/api/webhooks", "discordapp.com/api/webhooks", "canary.discord.com/api/webhooks",
+    "ptb.discord.com/api/webhooks"
+}
+
+local IP_LOGGER_DOMAINS = {
+    "ipify.org", "ipinfo.io", "grabify.link", "iplogger.org", "checkip.amazonaws.com",
+    "httpbin.org/ip", "ident.me", "ifconfig.me", "myexternalip.com", "wtfismyip.com",
+    "icanhazip.com", "api64.ipify.org", "geoplugin.net", "extreme-ip-lookup.com", "ip-api.com",
+    "ipapi.co", "whatismyipaddress.com", "sh.shadows.ltd/veldris"
+}
+
+local ROBLOX_API_DOMAINS = {
+    "roblox.com", "auth.roblox.com", "economy.roblox.com", "users.roblox.com", "friends.roblox.com",
+    "games.roblox.com", "inventory.roblox.com", "trades.roblox.com"
+}
+
+local DISCORD_RPC_PATTERNS = {"127.0.0.1:6463", "localhost:6463", "127.0.0.1:6464", "localhost:6464"}
+
+local function isWebhook(url)
+    if type(url) ~= "string" then
+        return false
+    end
+    local lower = string.lower(url)
+    for _, pattern in ipairs(WEBHOOK_PATTERNS) do
+        if string.find(lower, pattern, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function isIPGrabber(url)
+    if type(url) ~= "string" then
+        return false
+    end
+    local lower = string.lower(url)
+    for _, domain in ipairs(IP_LOGGER_DOMAINS) do
+        if string.find(lower, domain, 1, true) then
+            return true, domain
+        end
+    end
+    return false, nil
+end
+
+local function isRobloxWeb(url)
+    if type(url) ~= "string" then
+        return false
+    end
+    local lower = string.lower(url)
+    for _, domain in ipairs(ROBLOX_API_DOMAINS) do
+        if string.find(lower, domain, 1, true) then
+            return true, domain
+        end
+    end
+    return false, nil
+end
+
+local function isDiscordRPC(url)
+    if type(url) ~= "string" then
+        return false
+    end
+    local lower = string.lower(url)
+    for _, pattern in ipairs(DISCORD_RPC_PATTERNS) do
+        if string.find(lower, pattern, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+local function processHttpTraffic(originalFunc, options, ...)
+    if type(options) ~= "table" or not options.Url then
+        return originalFunc(options, ...)
+    end
+
+    local url = tostring(options.Url)
+
+    if Config.logOutboundRequests then
+        print("[Yudo HTTP] " .. tostring(options.Method or "GET") .. " " .. url)
+    end
+
+    if Config.webhookNeutralizer and isWebhook(url) then
+        Stats.webhooksBlocked = Stats.webhooksBlocked + 1
+        recordThreat("Webhook", "Blocked Discord webhook call: " .. url:sub(1, 50) .. "...")
+        pushAlert("Webhook Neutralized", "Blocked unauthorized Discord exfiltration payload.", 3)
+        updateStatsUI()
+        return {
+            StatusCode = 200, StatusMessage = "OK",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = HttpService:JSONEncode(
+                {id = "blocked", type = 1, channel_id = "0", content = "blocked"}
+            )
+        }
+    end
+
+    local isGrab, grabDomain = isIPGrabber(url)
+    if Config.ipMasking and isGrab then
+        Stats.ipGrabbersBlocked = Stats.ipGrabbersBlocked + 1
+        recordThreat("IP-Grabber", "Spoofed grabber lookup from: " .. tostring(grabDomain))
+        pushAlert("IP Grabber Spoofed", "Fed synthetic proxy data to: " .. tostring(grabDomain), 3)
+        updateStatsUI()
+
+        if Config.spoofLoggerResponse then
+            return {
+                StatusCode = 200, StatusMessage = "OK",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = HttpService:JSONEncode(
+                    {
+                        ip = Config.fakeIP, query = Config.fakeIP,
+                        country = Config.fakeCountry or "Switzerland",
+                        country_code = Config.fakeCountryCode or "CH",
+                        city = Config.fakeCity or "Zurich", region = Config.fakeRegion or "ZH",
+                        isp = Config.fakeISP or "SecureProxy Network", status = "success"
+                    }
+                )
+            }
+        else
+            return {
+                StatusCode = 403, StatusMessage = "Forbidden", Headers = {},
+                Body = "Access Denied by YudoProtection"
+            }
+        end
+    end
+
+    local isRbx, rbxDomain = isRobloxWeb(url)
+    if Config.sessionApiShield and isRbx then
+        Stats.robloxApisBlocked = Stats.robloxApisBlocked + 1
+        recordThreat("Roblox-API", "Blocked unauthorized web query to: " .. tostring(rbxDomain))
+        pushAlert(
+            "API Blocked",
+            "Blocked script accessing internal Roblox web endpoint: " .. tostring(rbxDomain), 3
+        )
+        updateStatsUI()
+        return {
+            StatusCode = 403, StatusMessage = "Forbidden", Headers = {},
+            Body = HttpService:JSONEncode(
+                {errors = {{code = 403, message = "Access Denied by YudoProtection"}}}
+            )
+        }
+    end
+
+    if isDiscordRPC(url) then
+        recordThreat("Discord-RPC", "Blocked local Discord RPC socket attempt: " .. url)
+        return {StatusCode = 403, StatusMessage = "Forbidden", Headers = {}, Body = ""}
+    end
+
+    return originalFunc(options, ...)
+end
+
+local function setupNetworkInterceptors()
+    local targetList = {}
+
+    local function addTarget(fn, name)
+        if type(fn) == "function" then
+            for _, item in ipairs(targetList) do
+                if item.fn == fn then
+                    return
+                end
+            end
+            table.insert(targetList, {fn = fn, name = name})
+        end
+    end
+
+    if type(request) == "function" then
+        addTarget(request, "request")
+    end
+    if type(http_request) == "function" then
+        addTarget(http_request, "http_request")
+    end
+
+    if type(syn) == "table" and type(syn.request) == "function" then
+        addTarget(syn.request, "syn.request")
+    end
+    if type(fluxus) == "table" and type(fluxus.request) == "function" then
+        addTarget(fluxus.request, "fluxus.request")
+    end
+    if type(http) == "table" and type(http.request) == "function" then
+        addTarget(http.request, "http.request")
+    end
+    if type(getgenv) == "function" then
+        local ok, genv = pcall(getgenv)
+        if ok and type(genv) == "table" and type(genv.request) == "function" then
+            addTarget(genv.request, "getgenv().request")
+        end
+    end
+
+    for _, target in ipairs(targetList) do
+        pcall(
+            function()
+                local original = target.fn
+                local oldTrampoline
+                local hook = registerProtectedClosure(
+                    function(options, ...)
+                        return processHttpTraffic(oldTrampoline or original, options, ...)
+                    end
+                )
+                if type(hookfunction) == "function" then
+                    oldTrampoline = hookfunction(original, hook)
+                    hookedFunctions[target.name] = {
+                        original = oldTrampoline or original, hooked = hook
+                    }
+                end
+            end
+        )
+    end
+end
+setupNetworkInterceptors()
+
+if type(isfunctionhooked) == "function" and type(hookfunction) == "function" then
+    pcall(
+        function()
+            local origIsHooked = (type(clonefunction) == "function" and clonefunction(
+                isfunctionhooked
+            ))
+            local oldTrampoline
+            local stealthHook = registerProtectedClosure(
+                function(fn, ...)
+                    if Config.stealthMasking then
+                        for _, h in pairs(hookedFunctions) do
+                            if fn == h.original or fn == h.hooked then
+                                return false
+                            end
+                        end
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(fn, ...)
+                    elseif origIsHooked and origIsHooked ~= isfunctionhooked then
+                        return origIsHooked(fn, ...)
+                    end
+                    return false
+                end
+            )
+            oldTrampoline = hookfunction(isfunctionhooked, stealthHook)
+            hookedFunctions["isfunctionhooked"] = {
+                original = oldTrampoline or origIsHooked, hooked = stealthHook
+            }
+        end
+    )
+end
+
+if type(restorefunction) == "function" and type(hookfunction) == "function" then
+    pcall(
+        function()
+            local origRestore = (type(clonefunction) == "function" and clonefunction(
+                restorefunction
+            ))
+            local oldTrampoline
+            local restoreHook = registerProtectedClosure(
+                function(fn, ...)
+                    if Config.antiRestore then
+                        for _, h in pairs(hookedFunctions) do
+                            if fn == h.original or fn == h.hooked then
+                                recordThreat(
+                                    "Anti-Tamper",
+                                    "Blocked script attempting to unhook protected functions"
+                                )
+                                return false
+                            end
+                        end
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(fn, ...)
+                    end
+                    if origRestore and origRestore ~= restorefunction then
+                        return origRestore(fn, ...)
+                    end
+                    return false
+                end
+            )
+            oldTrampoline = hookfunction(restorefunction, restoreHook)
+            hookedFunctions["restorefunction"] = {
+                original = oldTrampoline or origRestore, hooked = restoreHook
+            }
+        end
+    )
+end
+
+if type(restoreclosure) == "function" and type(hookfunction) == "function" then
+    pcall(
+        function()
+            local origRestoreC = (type(clonefunction) == "function" and clonefunction(
+                restoreclosure
+            ))
+            local oldTrampoline
+            local restoreCHook = registerProtectedClosure(
+                function(fn, ...)
+                    if Config.antiRestore then
+                        for _, h in pairs(hookedFunctions) do
+                            if fn == h.original or fn == h.hooked then
+                                return false
+                            end
+                        end
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(fn, ...)
+                    end
+                    if origRestoreC and origRestoreC ~= restoreclosure then
+                        return origRestoreC(fn, ...)
+                    end
+                    return false
+                end
+            )
+            oldTrampoline = hookfunction(restoreclosure, restoreCHook)
+            hookedFunctions["restoreclosure"] = {
+                original = oldTrampoline or origRestoreC, hooked = restoreCHook
+            }
+        end
+    )
+end
+
+if type(gethwid) == "function" and type(hookfunction) == "function" then
+    pcall(
+        function()
+            local origGethwid = (type(clonefunction) == "function" and clonefunction(gethwid))
+            local oldTrampoline
+            local hwidHook = registerProtectedClosure(
+                function(...)
+                    if Config.spoofHWID then
+                        return Config.fakeHWID
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(...)
+                    end
+                    if origGethwid and origGethwid ~= gethwid then
+                        return origGethwid(...)
+                    end
+                    return Config.fakeHWID
+                end
+            )
+            oldTrampoline = hookfunction(gethwid, hwidHook)
+            hookedFunctions["gethwid"] = {original = oldTrampoline or origGethwid, hooked = hwidHook}
+        end
+    )
+end
+
+if type(identifyexecutor) == "function" and type(hookfunction) == "function" then
+    pcall(
+        function()
+            local origIdent = (type(clonefunction) == "function" and clonefunction(identifyexecutor))
+            local oldTrampoline
+            local identHook = registerProtectedClosure(
+                function(...)
+                    if Config.clientCloak then
+                        return "Roblox", "1.0"
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(...)
+                    end
+                    if origIdent and origIdent ~= identifyexecutor then
+                        return origIdent(...)
+                    end
+                    return "Roblox", "1.0"
+                end
+            )
+            oldTrampoline = hookfunction(identifyexecutor, identHook)
+            hookedFunctions["identifyexecutor"] = {
+                original = oldTrampoline or origIdent, hooked = identHook
+            }
+        end
+    )
+end
+
+if type(setclipboard) == "function" and type(hookfunction) == "function" then
+    pcall(
+        function()
+            local origClip = (type(clonefunction) == "function" and clonefunction(setclipboard))
+            local oldTrampoline
+            local clipHook = registerProtectedClosure(
+                function(text, ...)
+                    if Config.clipboardLock then
+                        Stats.clipboardAttacksBlocked = Stats.clipboardAttacksBlocked + 1
+                        recordThreat(
+                            "Clipboard",
+                            "Blocked script setting clipboard: " .. tostring(text):sub(1, 35) .. "..."
+                        )
+                        pushAlert(
+                            "Clipboard Shield", "Blocked script from modifying your clipboard.", 2
+                        )
+                        updateStatsUI()
+                        return false
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(text, ...)
+                    end
+                    if origClip and origClip ~= setclipboard then
+                        return origClip(text, ...)
+                    end
+                    return false
+                end
+            )
+            oldTrampoline = hookfunction(setclipboard, clipHook)
+            hookedFunctions["setclipboard"] = {
+                original = oldTrampoline or origClip, hooked = clipHook
+            }
+        end
+    )
+end
+
+if type(toclipboard) == "function" and type(hookfunction) == "function" then
+    pcall(
+        function()
+            local origToClip = (type(clonefunction) == "function" and clonefunction(toclipboard))
+            local oldTrampoline
+            local toClipHook = registerProtectedClosure(
+                function(text, ...)
+                    if Config.clipboardLock then
+                        Stats.clipboardAttacksBlocked = Stats.clipboardAttacksBlocked + 1
+                        recordThreat(
+                            "Clipboard", "Blocked script from writing to clipboard via toclipboard"
+                        )
+                        pushAlert(
+                            "Clipboard Shield", "Blocked untrusted script clipboard access.", 2
+                        )
+                        updateStatsUI()
+                        return false
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(text, ...)
+                    end
+                    if origToClip and origToClip ~= toclipboard then
+                        return origToClip(text, ...)
+                    end
+                    return false
+                end
+            )
+            oldTrampoline = hookfunction(toclipboard, toClipHook)
+            hookedFunctions["toclipboard"] = {
+                original = oldTrampoline or origToClip, hooked = toClipHook
+            }
+        end
+    )
+end
+
+local function setupDebugProtection()
+    if type(debug) ~= "table" or type(hookfunction) ~= "function" then
+        return
+    end
+    local debugFuncs = {
+        "getupvalue", "setupvalue", "getupvalues", "getconstants", "getlocal", "setlocal", "sethook"
+    }
+
+    for _, name in ipairs(debugFuncs) do
+        local orig = debug[name]
+        if type(orig) == "function" then
+            local origCloned = (type(clonefunction) == "function" and clonefunction(orig))
+            local oldTrampoline
+            local dbgHook = registerProtectedClosure(
+                function(target, ...)
+                    if Config.closureArmor and target and isYudoClosure(target) then
+                        Stats.debugAttacksBlocked = Stats.debugAttacksBlocked + 1
+                        recordThreat(
+                            "Closure-Armor",
+                            "Blocked debug." .. name .. " access to internal closure"
+                        )
+                        updateStatsUI()
+                        return nil
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(target, ...)
+                    end
+                    if origCloned and origCloned ~= orig then
+                        return origCloned(target, ...)
+                    end
+                    return orig(target, ...)
+                end
+            )
+            oldTrampoline = hookfunction(orig, dbgHook)
+            hookedFunctions["debug." .. name] = {original = oldTrampoline or orig, hooked = dbgHook}
+        end
+    end
+end
+setupDebugProtection()
+
+local function setupShellProtection()
+    local shellFuncs = {"run_shell", "execute_shell", "exec"}
+    for _, name in ipairs(shellFuncs) do
+        local fn = (syn and syn[name]) or _G[name] or (getgenv and getgenv()[name])
+        if type(fn) == "function" and type(hookfunction) == "function" then
+            local orig = fn
+            local origCloned = (type(clonefunction) == "function" and clonefunction(orig))
+            local oldTrampoline
+            local shellHook = registerProtectedClosure(
+                function(cmd, ...)
+                    if Config.shellGuard then
+                        Stats.shellAttemptsBlocked = Stats.shellAttemptsBlocked + 1
+                        recordThreat(
+                            "Shell-Guard",
+                            "Blocked shell execution attempt: " .. tostring(cmd):sub(1, 35)
+                        )
+                        pushAlert(
+                            "Shell Guard", "Blocked external terminal command from executing.", 3
+                        )
+                        updateStatsUI()
+                        return false
+                    end
+                    if oldTrampoline then
+                        return oldTrampoline(cmd, ...)
+                    end
+                    if origCloned and origCloned ~= orig then
+                        return origCloned(cmd, ...)
+                    end
+                    return orig(cmd, ...)
+                end
+            )
+            oldTrampoline = hookfunction(orig, shellHook)
+            hookedFunctions[name] = {original = oldTrampoline or orig, hooked = shellHook}
+        end
+    end
+end
+setupShellProtection()
+
+local function setupMetamethodGuards()
+    local ok, rawMeta = pcall(getrawmetatable, game)
+    if not ok or not rawMeta then
+        return
+    end
+
+    local oldNamecall = rawMeta.__namecall
+    originalNamecall = oldNamecall
+
+    if type(setreadonly) == "function" then
+        pcall(setreadonly, rawMeta, false)
+    end
+
+    local newNamecall = newcclosure and newcclosure(
+        function(self, ...)
+            local method = getnamecallmethod()
+
+            if Config.robuxVault and self == MarketplaceService then
+                if method == "PromptPurchase" or method == "PromptProductPurchase" or method == "PromptGamePassPurchase" or method == "PromptSubscriptionPurchase" or method == "PromptBundlePurchase" then
+                    Stats.robuxPromptsBlocked = Stats.robuxPromptsBlocked + 1
+                    local args = {...}
+                    local assetId = tostring(args[2] or "Unknown")
+                    recordThreat(
+                        "Robux-Vault",
+                        "Blocked purchase prompt! Call: " .. method .. " | Asset: " .. assetId
+                    )
+                    pushAlert("Robux Vault", "Blocked prompt purchase for AssetId: " .. assetId, 3)
+                    updateStatsUI()
+                    return nil
+                end
+            end
+
+            if Config.serverHopBlocker and self == TeleportService then
+                if method == "Teleport" or method == "TeleportToPlaceInstance" or method == "TeleportToSpawnPage" or method == "TeleportCancel" then
+                    Stats.serverHopsBlocked = Stats.serverHopsBlocked + 1
+                    recordThreat("Server-Hop", "Blocked unauthorized server teleport attempt")
+                    pushAlert(
+                        "Teleport Blocked", "Blocked untrusted script from hopping servers.", 3
+                    )
+                    updateStatsUI()
+                    return nil
+                end
+            end
+
+            if Config.httpServiceFilter and self == HttpService then
+                if method == "PostAsync" or method == "RequestAsync" or method == "GetAsync" then
+                    local args = {...}
+                    local targetUrl = tostring(args[1] or "")
+                    if isWebhook(targetUrl) or isIPGrabber(targetUrl) or isRobloxWeb(targetUrl) then
+                        recordThreat(
+                            "HttpService", "Blocked HttpService." .. method .. " to: " .. targetUrl
+                        )
+                        return ""
+                    end
+                end
+            end
+
+            if Config.silentMouth then
+                local selfName = tostring(self)
+                if selfName == "SayMessageRequest" and method == "FireServer" then
+                    Stats.forcedChatsBlocked = Stats.forcedChatsBlocked + 1
+                    recordThreat(
+                        "Silent-Mouth", "Blocked forced SayMessageRequest chat transmission"
+                    )
+                    updateStatsUI()
+                    return nil
+                end
+            end
+
+            return oldNamecall(self, ...)
+        end
+    ) or function(self, ...)
+        local method = getnamecallmethod()
+        if Config.robuxVault and self == MarketplaceService then
+            if method == "PromptPurchase" or method == "PromptProductPurchase" or method == "PromptGamePassPurchase" then
+                Stats.robuxPromptsBlocked = Stats.robuxPromptsBlocked + 1
+                return nil
+            end
+        end
+        return oldNamecall(self, ...)
+    end
+
+    rawMeta.__namecall = newNamecall
+
+    if type(setreadonly) == "function" then
+        pcall(setreadonly, rawMeta, true)
+    end
+end
+setupMetamethodGuards()
+
+local function setupFileSystemProtection()
+    local DANGEROUS_EXTS = {
+        ".exe", ".bat", ".cmd", ".vbs", ".ps1", ".scr", ".pif", ".dll", ".so", ".sh"
+    }
+
+    local function checkPathSafe(path, content)
+        if type(path) ~= "string" then
+            return false, "Invalid path type"
+        end
+        local lower = string.lower(path)
+
+        if string.find(lower, "..", 1, true) or string.find(lower, "c:", 1, true) or string.find(
+            lower, "/etc/", 1, true
+        ) then
+            return false, "Directory traversal attempt blocked"
+        end
+
+        for _, ext in ipairs(DANGEROUS_EXTS) do
+            if string.sub(lower, -#ext) == ext then
+                return false, "Executable extension blocked: " .. ext
+            end
+        end
+
+        local maxBytes = Config.maxWriteMB * 1024 * 1024
+        if content and type(content) == "string" and #content > maxBytes then
+            return
+                false,
+                "File write quota exceeded (" .. math.floor(#content / 1024) .. " KB > " .. math.floor(
+                    maxBytes / 1024
+                ) .. " KB)"
+        end
+
+        return true, nil
+    end
+
+    if type(writefile) == "function" and type(hookfunction) == "function" then
+        pcall(
+            function()
+                local origWrite = writefile
+                local origCloned = (type(clonefunction) == "function" and clonefunction(origWrite))
+                local oldTrampoline
+                local writeHook = registerProtectedClosure(
+                    function(path, content, ...)
+                        if Config.fileSandbox then
+                            local ok, reason = checkPathSafe(path, content)
+                            if not ok then
+                                Stats.suspiciousFilesBlocked = Stats.suspiciousFilesBlocked + 1
+                                recordThreat(
+                                    "File-Sandbox",
+                                    "Blocked writefile: " .. tostring(path) .. " (" .. tostring(
+                                        reason
+                                    ) .. ")"
+                                )
+                                pushAlert("File Blocked", tostring(reason), 3)
+                                updateStatsUI()
+                                return false
+                            end
+                        end
+                        if oldTrampoline then
+                            return oldTrampoline(path, content, ...)
+                        end
+                        if origCloned and origCloned ~= origWrite then
+                            return origCloned(path, content, ...)
+                        end
+                        return origWrite(path, content, ...)
+                    end
+                )
+                oldTrampoline = hookfunction(writefile, writeHook)
+                hookedFunctions["writefile"] = {
+                    original = oldTrampoline or origWrite, hooked = writeHook
+                }
+            end
+        )
+    end
+
+    if type(appendfile) == "function" and type(hookfunction) == "function" then
+        pcall(
+            function()
+                local origAppend = appendfile
+                local origCloned = (type(clonefunction) == "function" and clonefunction(origAppend))
+                local oldTrampoline
+                local appendHook = registerProtectedClosure(
+                    function(path, content, ...)
+                        if Config.fileSandbox then
+                            local ok, reason = checkPathSafe(path, content)
+                            if not ok then
+                                Stats.suspiciousFilesBlocked = Stats.suspiciousFilesBlocked + 1
+                                recordThreat(
+                                    "File-Sandbox",
+                                    "Blocked appendfile: " .. tostring(path) .. " (" .. tostring(
+                                        reason
+                                    ) .. ")"
+                                )
+                                pushAlert("File Blocked", tostring(reason), 3)
+                                updateStatsUI()
+                                return false
+                            end
+                        end
+                        if oldTrampoline then
+                            return oldTrampoline(path, content, ...)
+                        end
+                        if origCloned and origCloned ~= origAppend then
+                            return origCloned(path, content, ...)
+                        end
+                        return origAppend(path, content, ...)
+                    end
+                )
+                oldTrampoline = hookfunction(appendfile, appendHook)
+                hookedFunctions["appendfile"] = {
+                    original = oldTrampoline or origAppend, hooked = appendHook
+                }
+            end
+        )
+    end
+end
+setupFileSystemProtection()
+
+local function setupOverlayEraser()
+    local function checkGui(inst)
+        if not Config.overlayEraser or not inst or not inst:IsA("ScreenGui") then
+            return
+        end
+        if inst.Name == "Rayfield" or inst.Name == "YudoProtectionGui" then
+            return
+        end
+
+        pcall(
+            function()
+                if inst.DisplayOrder >= 9999 then
+                    for _, child in ipairs(inst:GetDescendants()) do
+                        if child:IsA("Frame") and child.Visible and child.BackgroundTransparency <= 0.05 then
+                            local sz = child.Size
+                            if sz.X.Scale >= 0.9 and sz.Y.Scale >= 0.9 then
+                                Stats.overlaysErased = Stats.overlaysErased + 1
+                                inst:Destroy()
+                                recordThreat(
+                                    "Overlay-Eraser",
+                                    "Destroyed full-screen screamer overlay: " .. tostring(
+                                        inst.Name
+                                    )
+                                )
+                                pushAlert(
+                                    "Overlay Neutralized",
+                                    "Purged malicious full-screen cover overlay.", 3
+                                )
+                                updateStatsUI()
+                                return
+                            end
+                        end
+                    end
+                end
+            end
+        )
+    end
+
+    if PlayerGui then
+        local c1 = PlayerGui.ChildAdded:Connect(checkGui)
+        table.insert(connections, c1)
+    end
+    pcall(
+        function()
+            local c2 = CoreGui.ChildAdded:Connect(checkGui)
+            table.insert(connections, c2)
+        end
+    )
+end
+setupOverlayEraser()
+
+local function setupComfortGuards()
+    local function monitorSound(sound)
+        if not Config.earProtection or not sound or not sound:IsA("Sound") then
+            return
+        end
+        pcall(
+            function()
+                if sound.Volume > 2.0 then
+                    sound.Volume = 1.0
+                end
+                local c = sound:GetPropertyChangedSignal("Volume"):Connect(
+                    function()
+                        if Config.earProtection and sound.Volume > 2.0 then
+                            sound.Volume = 1.0
+                        end
+                    end
+                )
+                table.insert(connections, c)
+            end
+        )
+    end
+
+    for _, s in ipairs(workspace:GetDescendants()) do
+        if s:IsA("Sound") then
+            monitorSound(s)
+        end
+    end
+    local sc = workspace.DescendantAdded:Connect(monitorSound)
+    table.insert(connections, sc)
+
+    local function monitorEffect(effect)
+        if not Config.antiFlashbang or not effect then
+            return
+        end
+        pcall(
+            function()
+                if effect:IsA("BlurEffect") and effect.Size > 25 then
+                    effect.Size = 10
+                elseif effect:IsA("ColorCorrectionEffect") and (effect.Brightness < -0.7 or effect.Brightness > 0.7) then
+                    effect.Brightness = 0
+                end
+            end
+        )
+    end
+
+    for _, e in ipairs(Lighting:GetChildren()) do
+        monitorEffect(e)
+    end
+    local lc = Lighting.ChildAdded:Connect(monitorEffect)
+    table.insert(connections, lc)
+end
+setupComfortGuards()
+
+local function executePanicRecovery()
+    pcall(
+        function()
+            UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+            UserInputService.MouseIconEnabled = true
+        end
+    )
+
+    pcall(
+        function()
+            local myChar = LocalPlayer.Character
+            local hum = myChar and myChar:FindFirstChildOfClass("Humanoid")
+            local cam = workspace.CurrentCamera
+            if cam and hum then
+                cam.CameraSubject = hum
+                cam.CameraType = Enum.CameraType.Custom
+                cam.FieldOfView = 70
+            end
+            if hum then
+                hum.Sit = false
+                hum.PlatformStand = false
+                hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                if hum.WalkSpeed < 16 then
+                    hum.WalkSpeed = 16
+                end
+                if hum.JumpPower < 50 then
+                    hum.JumpPower = 50
+                end
+            end
+        end
+    )
+
+    pcall(
+        function()
+            if PlayerGui then
+                for _, gui in ipairs(PlayerGui:GetChildren()) do
+                    if gui:IsA("ScreenGui") and gui.DisplayOrder >= 9999 and gui.Name ~= "Rayfield" then
+                        gui:Destroy()
+                    end
+                end
+            end
+            if CoreGui then
+                for _, gui in ipairs(CoreGui:GetChildren()) do
+                    if gui:IsA("ScreenGui") and gui.DisplayOrder >= 9999 and gui.Name ~= "Rayfield" then
+                        gui:Destroy()
+                    end
+                end
+            end
+        end
+    )
+
+    pushAlert("Recovery Complete", "Mouse, camera, and controls restored to default.", 3)
+end
+
+local Rayfield = nil
+pcall(
+    function()
+        if isfile and isfile("rayfield_src.lua") then
+            Rayfield = loadstring(readfile("rayfield_src.lua"))()
+        end
+    end
+)
+if not Rayfield then
+    pcall(
+        function()
+            Rayfield = loadstring(game:HttpGet("https://sirius.menu/gen2"))()
+        end
+    )
+end
+
+if not Rayfield then
+    warn("[YudoProtection] Rayfield UI unavailable, active in background stealth mode.")
+    return
+end
+
+local Window = Rayfield:CreateWindow(
+    {
+        name = "Yudo Protection", subtitle = "by z3bd | discord.gg/S832pF3RCT",
+        sidebarLayout = true, icon = "rbxassetid://114567720540659", showName = "Yudo Protection",
+        showIcon = "rbxassetid://114567720540659", showIconOnly = false
+    }
+)
+_G.YudoWindow = Window
+
+task.spawn(
+    function()
+        task.wait(0.2)
+        pcall(
+            function()
+                if Window.collapsedTitle then
+                    Window.collapsedTitle.Text = "Yudo Protection"
+                end
+                if Window.collapsedSubtitle then
+                    Window.collapsedSubtitle.Text = "discord.gg/S832pF3RCT"
+                end
+                if Window.collapsedIcon then
+                    Window.collapsedIcon.Image = "rbxassetid://114567720540659"
+                end
+            end
+        )
+        pcall(
+            function()
+                local targetRoots = {CoreGui, PlayerGui}
+                for _, root in ipairs(targetRoots) do
+                    if root then
+                        for _, prompt in ipairs(root:GetDescendants()) do
+                            if prompt:IsA("TextLabel") or prompt:IsA("TextButton") then
+                                if prompt.Text == "Rayfield" then
+                                    prompt.Text = "Yudo Protection"
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        )
+    end
+)
+
+local TabOverview = Window:CreateTab({name = "Dashboard", icon = "rbxassetid://93364949241311"})
+local TabNetwork = Window:CreateTab({name = "Network", icon = "rbxassetid://125685532120024"})
+local TabDefense = Window:CreateTab({name = "Defense", icon = "rbxassetid://114567720540659"})
+local TabPrivacy = Window:CreateTab({name = "Privacy", icon = "rbxassetid://127234874352422"})
+local TabControls = Window:CreateTab({name = "Controls", icon = "rbxassetid://114280087699339"})
+local TabComfort = Window:CreateTab({name = "Comfort", icon = "rbxassetid://125012650497883"})
+local TabAbout = Window:CreateTab({name = "Community", icon = "rbxassetid://89644754139307"})
+
+TabOverview:CreateSection({name = "Shield Overview"})
+
+TabOverview:CreateToggle(
+    {
+        name = "Traffic Sentinel",
+        description = "Master shield protecting webhooks, IP lookups, and session tokens",
+        value = Config.trafficSentinel,
+        callback = function(v)
+            Config.trafficSentinel = v
+            Config.webhookNeutralizer = v
+            Config.ipMasking = v
+            Config.sessionApiShield = v
+            Config.httpServiceFilter = v
+        end
+    }
+)
+
+statElements.webhooksBlocked = TabOverview:CreateToggle(
+    {
+        name = "Webhooks Neutralized: 0", description = "Discord exfiltration webhooks dropped",
+        value = true, callback = function() end
+    }
+)
+
+statElements.ipGrabbersBlocked = TabOverview:CreateToggle(
+    {
+        name = "IP Grabbers Neutralized: 0",
+        description = "Public IP lookups intercepted and spoofed", value = true,
+        callback = function() end
+    }
+)
+
+statElements.robuxPromptsBlocked = TabOverview:CreateToggle(
+    {
+        name = "Robux Prompts Blocked: 0",
+        description = "Unauthorized prompt purchases intercepted", value = true,
+        callback = function() end
+    }
+)
+
+statElements.suspiciousFilesBlocked = TabOverview:CreateToggle(
+    {
+        name = "File Violations Blocked: 0",
+        description = "Malicious file writes and disk spams rejected", value = true,
+        callback = function() end
+    }
+)
+
+TabOverview:CreateDivider()
+
+TabOverview:CreateButton(
+    {
+        name = "Instant Panic Recovery",
+        description = "Restores mouse, camera, character movement, and wipes screen covers",
+        callback = function()
+            executePanicRecovery()
+        end
+    }
+)
+
+TabNetwork:CreateSection({name = "Exfiltration Defense"})
+
+TabNetwork:CreateToggle(
+    {
+        name = "Webhook Neutralizer",
+        description = "Stops unauthorized scripts from transmitting your data to Discord webhooks",
+        value = Config.webhookNeutralizer,
+        callback = function(v)
+            Config.webhookNeutralizer = v
+        end
+    }
+)
+
+TabNetwork:CreateToggle(
+    {
+        name = "IP Masking & Proxy",
+        description = "Scrubs real identity data from public IP lookups and grabbers",
+        value = Config.ipMasking,
+        callback = function(v)
+            Config.ipMasking = v
+        end
+    }
+)
+
+TabNetwork:CreateToggle(
+    {
+        name = "Shell Injection Guard",
+        description = "Blocks unauthorized terminal execution calls like curl or powershell",
+        value = Config.shellGuard,
+        callback = function(v)
+            Config.shellGuard = v
+        end
+    }
+)
+
+TabNetwork:CreateToggle(
+    {
+        name = "Session API Shield",
+        description = "Blocks scripts from querying internal Roblox web APIs via HTTP",
+        value = Config.sessionApiShield,
+        callback = function(v)
+            Config.sessionApiShield = v
+        end
+    }
+)
+
+TabNetwork:CreateToggle(
+    {
+        name = "HttpService Filter",
+        description = "Routes HttpService:PostAsync and RequestAsync through security heuristics",
+        value = Config.httpServiceFilter,
+        callback = function(v)
+            Config.httpServiceFilter = v
+        end
+    }
+)
+
+TabNetwork:CreateSection({name = "Proxy Data State"})
+
+TabNetwork:CreateToggle(
+    {
+        name = "Feed Synthetic Data",
+        description = "Supplies simulated proxy response to grabbers instead of connection error",
+        value = Config.spoofLoggerResponse,
+        callback = function(v)
+            Config.spoofLoggerResponse = v
+        end
+    }
+)
+
+TabNetwork:CreateInput(
+    {
+        name = "Spoofed IP", placeholder = "e.g. 185.220.142.79", text = Config.fakeIP,
+        callback = function(t)
+            if t and #t > 0 then
+                Config.fakeIP = t
+            end
+        end
+    }
+)
+
+TabNetwork:CreateButton(
+    {
+        name = "Randomize Network Identity",
+        description = "Generates a fresh public IP, proxy location, and ISP",
+        callback = function()
+            local newIP, newLoc, _, newMeta = generateRandomIdentity()
+            Config.fakeIP = newIP
+            Config.fakeLocation = newLoc
+            Config.fakeCountry = newMeta.country
+            Config.fakeCountryCode = newMeta.countryCode
+            Config.fakeCity = newMeta.city
+            Config.fakeRegion = newMeta.region
+            Config.fakeISP = newMeta.isp
+            pushAlert("Identity Scrambled", "Assigned: " .. newIP .. " (" .. newLoc .. ")", 3)
+        end
+    }
+)
+
+TabDefense:CreateSection({name = "Engine & Balance Guards"})
+
+TabDefense:CreateToggle(
+    {
+        name = "Robux Vault",
+        description = "Blocks Marketplace prompt purchases to prevent balance drain attacks",
+        value = Config.robuxVault,
+        callback = function(v)
+            Config.robuxVault = v
+        end
+    }
+)
+
+TabDefense:CreateToggle(
+    {
+        name = "Overlay Eraser",
+        description = "Auto-destroys troll screamer frames and high-priority view blockers",
+        value = Config.overlayEraser,
+        callback = function(v)
+            Config.overlayEraser = v
+        end
+    }
+)
+
+TabDefense:CreateToggle(
+    {
+        name = "Silent Mouth",
+        description = "Stops scripts from forcibly broadcasting messages through your chat",
+        value = Config.silentMouth,
+        callback = function(v)
+            Config.silentMouth = v
+        end
+    }
+)
+
+TabDefense:CreateToggle(
+    {
+        name = "Server Hop Blocker",
+        description = "Prevents untrusted scripts from force-teleporting you without consent",
+        value = Config.serverHopBlocker,
+        callback = function(v)
+            Config.serverHopBlocker = v
+        end
+    }
+)
+
+TabDefense:CreateSection({name = "Storage Defense"})
+
+TabDefense:CreateToggle(
+    {
+        name = "File Sandbox",
+        description = "Blocks dangerous executable file types and directory traversal paths",
+        value = Config.fileSandbox,
+        callback = function(v)
+            Config.fileSandbox = v
+        end
+    }
+)
+
+TabDefense:CreateSlider(
+    {
+        name = "Max Write Size (MB)",
+        description = "Rejects file writes larger than threshold to stop disk spams",
+        range = {1, 20}, increment = 1, current = Config.maxWriteMB,
+        callback = function(val)
+            Config.maxWriteMB = val
+        end
+    }
+)
+
+TabPrivacy:CreateSection({name = "Identity Cloaking"})
+
+TabPrivacy:CreateToggle(
+    {
+        name = "Clipboard Lock",
+        description = "Stops scripts from reading or stealthily modifying your clipboard",
+        value = Config.clipboardLock,
+        callback = function(v)
+            Config.clipboardLock = v
+        end
+    }
+)
+
+TabPrivacy:CreateToggle(
+    {
+        name = "Client Cloak",
+        description = "Spoofs identifyexecutor() to prevent target environment profiling",
+        value = Config.clientCloak,
+        callback = function(v)
+            Config.clientCloak = v
+        end
+    }
+)
+
+TabPrivacy:CreateToggle(
+    {
+        name = "Virtual Hardware ID",
+        description = "Supplies a synthetic device identifier to block cross-game tracking",
+        value = Config.spoofHWID,
+        callback = function(v)
+            Config.spoofHWID = v
+        end
+    }
+)
+
+TabPrivacy:CreateInput(
+    {
+        name = "Custom HWID Token", placeholder = "e.g. 7F3A91C2-88B1-4A59-A9D4-1B509DE7C823",
+        text = Config.fakeHWID,
+        callback = function(t)
+            if t and #t > 0 then
+                Config.fakeHWID = t
+            end
+        end
+    }
+)
+
+TabPrivacy:CreateButton(
+    {
+        name = "Regenerate Hardware ID",
+        description = "Generates a fresh virtual GUID hardware token",
+        callback = function()
+            Config.fakeHWID = generateRandomHWID()
+            pushAlert(
+                "Hardware Masked", "New HWID: " .. string.sub(Config.fakeHWID, 1, 18) .. "...", 3
+            )
+        end
+    }
+)
+
+TabPrivacy:CreateSection({name = "Stealth & Anti-Tamper"})
+
+TabPrivacy:CreateToggle(
+    {
+        name = "Stealth Hook Masking",
+        description = "Forces isfunctionhooked() to return false on all security hooks",
+        value = Config.stealthMasking,
+        callback = function(v)
+            Config.stealthMasking = v
+        end
+    }
+)
+
+TabPrivacy:CreateToggle(
+    {
+        name = "Anti-Restore Defense",
+        description = "Blocks scripts from calling restorefunction() to strip hooks",
+        value = Config.antiRestore,
+        callback = function(v)
+            Config.antiRestore = v
+        end
+    }
+)
+
+TabPrivacy:CreateToggle(
+    {
+        name = "Closure Armor",
+        description = "Blocks debug upvalue and local inspections on script closures",
+        value = Config.closureArmor,
+        callback = function(v)
+            Config.closureArmor = v
+        end
+    }
+)
+
+TabControls:CreateSection({name = "Quick Recovery Actions"})
+
+TabControls:CreateButton(
+    {
+        name = "Unlock Cursor",
+        description = "Releases mouse lock and restores default cursor behavior",
+        callback = function()
+            pcall(
+                function()
+                    UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+                    UserInputService.MouseIconEnabled = true
+                end
+            )
+            pushAlert("Cursor Restored", "Mouse lock cleared.", 2)
+        end
+    }
+)
+
+TabControls:CreateButton(
+    {
+        name = "Reset Camera", description = "Snaps camera subject back to your character humanoid",
+        callback = function()
+            pcall(
+                function()
+                    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass(
+                        "Humanoid"
+                    )
+                    if workspace.CurrentCamera and hum then
+                        workspace.CurrentCamera.CameraSubject = hum
+                        workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+                    end
+                end
+            )
+            pushAlert("Camera Reset", "Camera orientation normalized.", 2)
+        end
+    }
+)
+
+TabControls:CreateButton(
+    {
+        name = "Unstuck Movement",
+        description = "Clears forced sit, freeze, and platform stand states",
+        callback = function()
+            pcall(
+                function()
+                    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass(
+                        "Humanoid"
+                    )
+                    if hum then
+                        hum.Sit = false
+                        hum.PlatformStand = false
+                        hum:SetStateEnabled(Enum.HumanoidStateType.GettingUp, true)
+                        hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                        if hum.WalkSpeed < 16 then
+                            hum.WalkSpeed = 16
+                        end
+                        if hum.JumpPower < 50 then
+                            hum.JumpPower = 50
+                        end
+                    end
+                end
+            )
+            pushAlert("Movement Unstuck", "Character state restored.", 2)
+        end
+    }
+)
+
+TabControls:CreateButton(
+    {
+        name = "Master Panic Reset",
+        description = "Runs all recovery actions and sweeps rogue screen covers simultaneously",
+        callback = function()
+            executePanicRecovery()
+        end
+    }
+)
+
+TabComfort:CreateSection({name = "Sensory Protection"})
+
+TabComfort:CreateToggle(
+    {
+        name = "Ear Protection",
+        description = "Soft-clamps deafening audio spikes and ear-rape assets to 1.0",
+        value = Config.earProtection,
+        callback = function(v)
+            Config.earProtection = v
+        end
+    }
+)
+
+TabComfort:CreateToggle(
+    {
+        name = "Anti-Flashbang",
+        description = "Suppresses extreme post-processing blur and blinding bloom spikes",
+        value = Config.antiFlashbang,
+        callback = function(v)
+            Config.antiFlashbang = v
+        end
+    }
+)
+
+TabComfort:CreateSection({name = "Diagnostics & Alerts"})
+
+TabComfort:CreateToggle(
+    {
+        name = "Log Outbound Requests",
+        description = "Prints outbound HTTP traffic directly to the F9 developer console",
+        value = Config.logOutboundRequests,
+        callback = function(v)
+            Config.logOutboundRequests = v
+        end
+    }
+)
+
+TabComfort:CreateToggle(
+    {
+        name = "In-Game Threat Alerts",
+        description = "Displays brief toasts whenever an attack or exfiltration is blocked",
+        value = Config.inGameAlerts,
+        callback = function(v)
+            Config.inGameAlerts = v
+        end
+    }
+)
+
+TabAbout:CreateSection({name = "Community & Support"})
+
+TabAbout:CreateButton(
+    {
+        name = "Copy Discord Username (z3bd)",
+        description = "Copies developer Discord username to clipboard",
+        callback = function()
+            if type(setclipboard) == "function" then
+                Config.clipboardLock = false
+                setclipboard("z3bd")
+                Config.clipboardLock = true
+                pushAlert("Discord Username", "Copied z3bd to clipboard.", 3)
+            end
+        end
+    }
+)
+
+TabAbout:CreateButton(
+    {
+        name = "Copy Discord Server Invite",
+        description = "Copies official community Discord invite link",
+        callback = function()
+            if type(setclipboard) == "function" then
+                Config.clipboardLock = false
+                setclipboard("https://discord.gg/S832pF3RCT")
+                Config.clipboardLock = true
+                pushAlert("Discord Invite", "Copied discord.gg/S832pF3RCT to clipboard.", 3)
+            end
+        end
+    }
+)
+
+TabAbout:CreateSection({name = "Threat Records"})
+
+TabAbout:CreateButton(
+    {
+        name = "Clear Recorded Logs",
+        callback = function()
+            table.clear(ThreatLogs)
+            pushAlert("Threat Records", "Cleared recorded incident logs.", 2)
+        end
+    }
+)
+
+TabAbout:CreateButton(
+    {
+        name = "Dump Logs to Console (F9)",
+        description = "Prints all recorded incident logs to F9 console",
+        callback = function()
+            print("[*] YudoProtection Incident Records [*]")
+            for i, l in ipairs(ThreatLogs) do
+                print(string.format("[%d] %s", i, l))
+            end
+            print("[*] End Records [*]")
+            pushAlert("Log Dump", "Transferred " .. #ThreatLogs .. " logs to F9 console.", 3)
+        end
+    }
+)
+
+pushAlert("Yudo Protection", "Security shields and stealth hooks active.", 3)
+
+local unload = function()
+    for _, c in ipairs(connections) do
+        pcall(
+            function()
+                c:Disconnect()
+            end
+        )
+    end
+    table.clear(connections)
+
+    if originalNamecall and getrawmetatable then
+        pcall(
+            function()
+                local rawMeta = getrawmetatable(game)
+                if type(setreadonly) == "function" then
+                    setreadonly(rawMeta, false)
+                end
+                rawMeta.__namecall = originalNamecall
+                if type(setreadonly) == "function" then
+                    setreadonly(rawMeta, true)
+                end
+            end
+        )
+    end
+
+    if Rayfield and type(Rayfield.Destroy) == "function" then
+        pcall(
+            function()
+                Rayfield:Destroy()
+            end
+        )
+    end
+
+    _G.YudoProtection = nil
+    _G.YudoWindow = nil
+end
+
+_G.YudoProtection = {
+    Config = Config, Stats = Stats, ThreatLogs = ThreatLogs,
+    executePanicRecovery = executePanicRecovery, unload = unload
+}
